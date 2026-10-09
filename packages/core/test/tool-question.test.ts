@@ -38,6 +38,7 @@ const question = Layer.succeed(
       Effect.sync(() => {
         captured = input
       }).pipe(Effect.andThen(reject ? Effect.fail(new QuestionV2.RejectedError()) : Effect.succeed([["Build"], []]))),
+    askSecret: () => Effect.die("unused"),
     reply: () => Effect.die("unused"),
     reject: () => Effect.die("unused"),
     list: () => Effect.die("unused"),

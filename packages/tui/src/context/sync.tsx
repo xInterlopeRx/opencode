@@ -33,6 +33,11 @@ import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
 
+export type TuiQuestionRequest = QuestionRequest & {
+  protocol?: "v2"
+  sensitive?: boolean
+}
+
 const emptyConsoleState: ConsoleState = {
   consoleManagedProviders: [],
   switchableOrgCount: 0,
@@ -83,7 +88,7 @@ export const {
         [sessionID: string]: PermissionRequest[]
       }
       question: {
-        [sessionID: string]: QuestionRequest[]
+        [sessionID: string]: TuiQuestionRequest[]
       }
       config: Config
       session: Session[]
@@ -239,9 +244,45 @@ export const {
           )
           break
         }
+        case "question.v2.replied":
+        case "question.v2.rejected": {
+          const requests = store.question[event.properties.sessionID]
+          if (!requests) break
+          const match = search(requests, event.properties.requestID, (r) => r.id)
+          if (!match.found) break
+          setStore(
+            "question",
+            event.properties.sessionID,
+            produce((draft) => {
+              draft.splice(match.index, 1)
+            }),
+          )
+          break
+        }
 
         case "question.asked": {
-          const request = event.properties
+          const request: TuiQuestionRequest = event.properties
+          const requests = store.question[request.sessionID]
+          if (!requests) {
+            setStore("question", request.sessionID, [request])
+            break
+          }
+          const match = search(requests, request.id, (r) => r.id)
+          if (match.found) {
+            setStore("question", request.sessionID, match.index, reconcile(request))
+            break
+          }
+          setStore(
+            "question",
+            request.sessionID,
+            produce((draft) => {
+              draft.splice(match.index, 0, request)
+            }),
+          )
+          break
+        }
+        case "question.v2.asked": {
+          const request: TuiQuestionRequest = { ...event.properties, protocol: "v2" }
           const requests = store.question[request.sessionID]
           if (!requests) {
             setStore("question", request.sessionID, [request])

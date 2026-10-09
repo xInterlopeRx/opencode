@@ -33,6 +33,19 @@ describe("contract hygiene", () => {
     expect(Pty.ID.create()).toStartWith("pty_")
   })
 
+  test("sensitive question requests omit an undefined flag when encoded", () => {
+    const request = {
+      id: Question.ID.create(),
+      sessionID: Session.ID.create(),
+      questions: [],
+    }
+    expect(Schema.encodeSync(Question.Request)({ ...request, sensitive: undefined })).toEqual(request)
+    expect(Schema.encodeSync(Question.Request)({ ...request, sensitive: true })).toEqual({
+      ...request,
+      sensitive: true,
+    })
+  })
+
   test("reusable public identifiers are stable and unique", () => {
     const identifiers = [
       Agent.Color,

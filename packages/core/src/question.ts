@@ -48,6 +48,12 @@ export interface AskInput {
   readonly tool?: Tool
 }
 
+export interface AskSecretInput {
+  readonly sessionID: SessionSchema.ID
+  readonly question: Info
+  readonly tool?: Tool
+}
+
 export interface ReplyInput {
   readonly requestID: ID
   readonly answers: ReadonlyArray<Answer>
@@ -55,6 +61,7 @@ export interface ReplyInput {
 
 export interface Interface {
   readonly ask: (input: AskInput) => Effect.Effect<ReadonlyArray<Answer>, RejectedError>
+  readonly askSecret: (input: AskSecretInput) => Effect.Effect<Uint8Array, RejectedError>
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly reject: (requestID: ID) => Effect.Effect<void, NotFoundError>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
@@ -90,24 +97,50 @@ const layer = Layer.effect(
       ),
     )
 
-    const ask = Effect.fn("QuestionV2.ask")((input: AskInput) =>
-      Effect.uninterruptibleMask((restore) =>
+    const askInternal = Effect.fnUntraced(function* (input: AskInput, sensitive: boolean) {
+      return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const id = ID.ascending()
           const deferred = yield* Deferred.make<ReadonlyArray<Answer>, RejectedError>()
-          const request: Request = { id, ...input }
+          const request: Request = { id, ...input, ...(sensitive ? { sensitive: true } : {}) }
           pending.set(id, { request, deferred })
           return yield* events.publish(Event.Asked, request).pipe(
             Effect.andThen(restore(Deferred.await(deferred))),
             Effect.ensuring(
-              Effect.sync(() => {
-                pending.delete(id)
+              Effect.gen(function* () {
+                if (!pending.delete(id)) return
+                yield* events.publish(Event.Rejected, { sessionID: input.sessionID, requestID: id })
               }),
             ),
           )
         }),
-      ),
-    )
+      )
+    })
+
+    const ask = Effect.fn("QuestionV2.ask")(function* (input: AskInput) {
+      return yield* askInternal(input, false)
+    })
+
+    const askSecret = Effect.fn("QuestionV2.askSecret")(function* (input: AskSecretInput) {
+      const answers = yield* askInternal(
+        {
+          sessionID: input.sessionID,
+          questions: [input.question],
+          tool: input.tool,
+        },
+        true,
+      )
+      const value = answers[0]?.[0]
+      if (answers.length !== 1 || answers[0]?.length !== 1 || !value || /[\r\n\0]/.test(value)) {
+        return yield* new RejectedError()
+      }
+      const password = new TextEncoder().encode(value)
+      if (password.length > 4096) {
+        password.fill(0)
+        return yield* new RejectedError()
+      }
+      return password
+    })
 
     const reply = Effect.fn("QuestionV2.reply")((input: ReplyInput) =>
       Effect.uninterruptible(
@@ -117,7 +150,9 @@ const layer = Layer.effect(
           yield* events.publish(Event.Replied, {
             sessionID: existing.request.sessionID,
             requestID: existing.request.id,
-            answers: input.answers.map((answer) => [...answer]),
+            answers: existing.request.sensitive
+              ? existing.request.questions.map(() => [])
+              : input.answers.map((answer) => [...answer]),
           })
           yield* Deferred.succeed(existing.deferred, input.answers)
           pending.delete(input.requestID)
@@ -144,7 +179,7 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.request)
     })
 
-    return Service.of({ ask, reply, reject, list })
+    return Service.of({ ask, askSecret, reply, reject, list })
   }),
 )
 

@@ -206,10 +206,14 @@ export const TuiThreadCommand = cmd({
         return
       }
       const cwd = Filesystem.resolve(process.cwd())
+      const network = resolveNetworkOptionsNoConfig(args)
+      const external = hasArg("--port") || hasArg("--hostname") || network.mdns === true
 
       const worker = new Worker(file, {
         env: Object.fromEntries(
-          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+          Object.entries({ ...process.env, OPENCODE_TUI_WORKER: external ? "0" : "1" }).filter(
+            (entry): entry is [string, string] => entry[1] !== undefined,
+          ),
         ),
       })
       const client = Rpc.client<typeof rpc>(worker)
@@ -229,9 +233,6 @@ export const TuiThreadCommand = cmd({
 
       const prompt = await input(args.prompt)
       const config = await TuiConfig.get()
-
-      const network = resolveNetworkOptionsNoConfig(args)
-      const external = hasArg("--port") || hasArg("--hostname") || network.mdns === true
 
       const headers = external ? ServerAuth.headers() : undefined
 

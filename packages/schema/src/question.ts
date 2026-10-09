@@ -53,6 +53,7 @@ export const Request = Schema.Struct({
   id: ID,
   sessionID: SessionID,
   questions: Schema.Array(Info).annotate({ description: "Questions to ask" }),
+  sensitive: Schema.Boolean.pipe(optional),
   tool: Tool.pipe(optional),
 }).annotate({ identifier: "QuestionV2.Request" })
 export interface Request extends Schema.Schema.Type<typeof Request> {}

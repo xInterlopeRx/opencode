@@ -66,6 +66,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
+import { SudoRuntime } from "@opencode-ai/core/sudo-runtime"
 import { lazy } from "@/util/lazy"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@opencode-ai/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
@@ -270,6 +271,7 @@ const app = LayerNode.group([
 
 export function createRoutes(
   corsOptions?: CorsOptions,
+  localTui = false,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
   const locationServiceMapV2 = buildLocationServiceMap()
 
@@ -292,6 +294,7 @@ export function createRoutes(
       HttpServer.layerServices,
     ]),
     Layer.provide(Layer.succeed(CorsConfig)(corsOptions)),
+    Layer.provide(Layer.succeed(SudoRuntime.LocalTui)(localTui)),
     Layer.provide(sessionLocationLayer),
     Layer.provide(locationLayer),
     Layer.provide(PtyEnvironment.layer),
@@ -312,7 +315,7 @@ export function createRoutes(
   )
 }
 
-export const routes = createRoutes()
+export const routes = createRoutes(undefined, process.env.OPENCODE_TUI_WORKER === "1")
 
 export const webHandler = lazy(() =>
   HttpRouter.toWebHandler(routes, {

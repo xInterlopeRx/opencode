@@ -1,17 +1,209 @@
 import { createStore } from "solid-js/store"
 import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
-import { useRenderer } from "@opentui/solid"
-import type { TextareaRenderable } from "@opentui/core"
+import { useKeyboard, useRenderer } from "@opentui/solid"
+import type { PasteEvent, TextareaRenderable } from "@opentui/core"
 import { selectedForeground, tint, useTheme } from "../../context/theme"
-import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
+import type { QuestionAnswer } from "@opencode-ai/sdk/v2"
 import { useSDK } from "../../context/sdk"
+import type { TuiQuestionRequest } from "../../context/sync"
 import { SplitBorder } from "../../ui/border"
 import { useTuiConfig } from "../../config"
 import { useBindings, useOpencodeModeStack } from "../../keymap"
 
 const QUESTION_MODE = "question"
 
-export function QuestionPrompt(props: { request: QuestionRequest; directory?: string }) {
+export function QuestionPrompt(props: { request: TuiQuestionRequest; directory?: string }) {
+  if (props.request.sensitive) return <SensitiveQuestionPrompt request={props.request} />
+  return <RegularQuestionPrompt {...props} />
+}
+
+function SensitiveQuestionPrompt(props: { request: TuiQuestionRequest }) {
+  const sdk = useSDK()
+  const { theme } = useTheme()
+  const tuiConfig = useTuiConfig()
+  const modeStack = useOpencodeModeStack()
+  const [store, setStore] = createStore({ secret: "", submitting: false, error: "" })
+  let textarea: TextareaRenderable | undefined
+
+  const masked = (value: string) => Array.from(value, () => "•").join("")
+
+  const setPassword = (value: string) => {
+    setStore("secret", value)
+    textarea?.setText(masked(value))
+    textarea?.gotoLineEnd()
+  }
+
+  const appendPassword = (value: string) => {
+    if (/[\r\n\0]/.test(value)) {
+      setStore("error", "Passwords must be entered on one line.")
+      return
+    }
+    const next = store.secret + value
+    const encoded = new TextEncoder().encode(next)
+    if (encoded.length > 4096) {
+      encoded.fill(0)
+      setStore("error", "Password must be 4096 bytes or less.")
+      return
+    }
+    encoded.fill(0)
+    setStore("error", "")
+    setPassword(next)
+  }
+
+  const clear = () => {
+    setStore("secret", "")
+    textarea?.setText("")
+  }
+
+  onCleanup(clear)
+  onMount(() => {
+    const popMode = modeStack.push(QUESTION_MODE)
+    onCleanup(popMode)
+  })
+
+  useKeyboard((event) => {
+    if (event.defaultPrevented || event.name === "return" || event.name === "escape") return
+    if (event.ctrl || event.meta || event.option) {
+      if (!(event.ctrl && event.name === "c")) event.preventDefault()
+      return
+    }
+    if (event.name === "backspace") {
+      event.preventDefault()
+      setStore("error", "")
+      setPassword(Array.from(store.secret).slice(0, -1).join(""))
+      return
+    }
+    if (event.name === "space") {
+      event.preventDefault()
+      appendPassword(" ")
+      return
+    }
+    if (Array.from(event.name).length === 1 && !/[\x00-\x1f\x7f]/.test(event.sequence)) {
+      event.preventDefault()
+      appendPassword(event.sequence)
+      return
+    }
+    event.preventDefault()
+  })
+
+  const submit = async () => {
+    if (store.submitting || !store.secret) return
+    const encoded = new TextEncoder().encode(store.secret)
+    if (encoded.length > 4096) {
+      encoded.fill(0)
+      setStore("error", "Password must be 4096 bytes or less. Edit it or press Esc to cancel.")
+      return
+    }
+    encoded.fill(0)
+    let password = store.secret
+    clear()
+    setStore("submitting", true)
+    setStore("error", "")
+    try {
+      const result = await sdk.client.v2.session.question.reply({
+        sessionID: props.request.sessionID,
+        requestID: props.request.id,
+        questionV2Reply: { answers: [[password]] },
+      })
+      if (result.error) setStore("error", "Unable to submit the password. Type it again or press Esc to cancel.")
+    } catch {
+      setStore("error", "Unable to submit the password. Type it again or press Esc to cancel.")
+    } finally {
+      password = ""
+      setStore("submitting", false)
+    }
+  }
+
+  const reject = async () => {
+    if (store.submitting) return
+    clear()
+    setStore("submitting", true)
+    try {
+      await sdk.client.v2.session.question.reject({
+        sessionID: props.request.sessionID,
+        requestID: props.request.id,
+      })
+    } catch {
+      setStore("error", "Unable to cancel sudo password entry. Press Esc to try again.")
+    } finally {
+      setStore("submitting", false)
+    }
+  }
+
+  useBindings(() => ({
+    mode: QUESTION_MODE,
+    commands: [
+      {
+        name: "app.exit",
+        title: "Cancel sudo password entry",
+        category: "Question",
+        run() {
+          void reject()
+        },
+      },
+    ],
+    bindings: [
+      { key: "return", desc: "Submit sudo password", group: "Question", cmd: () => void submit() },
+      { key: "escape", desc: "Cancel sudo password", group: "Question", cmd: () => void reject() },
+      ...tuiConfig.keybinds.get("app.exit"),
+    ],
+  }))
+
+  return (
+    <box
+      backgroundColor={theme.backgroundPanel}
+      border={["left"]}
+      borderColor={theme.accent}
+      customBorderChars={SplitBorder.customBorderChars}
+    >
+      <box gap={1} paddingLeft={1} paddingRight={3} paddingTop={1} paddingBottom={1}>
+        <text fg={theme.text}>{props.request.questions[0]?.question}</text>
+        <Show when={store.error}>
+          <text fg={theme.error}>{store.error}</text>
+        </Show>
+        <box flexDirection="row" gap={1}>
+          <text fg={theme.textMuted}>sudo password</text>
+          <Show when={!store.secret}>
+            <text fg={theme.textMuted}>Type to enter</text>
+          </Show>
+          <text fg={theme.text}>
+            {Array.from(store.secret, () => "•").join("")}
+            <span style={{ fg: theme.primary }}>▌</span>
+          </text>
+          <textarea
+            ref={(value: TextareaRenderable) => {
+              textarea = value
+              value.traits = { status: "ANSWER" }
+              queueMicrotask(() => value.focus())
+            }}
+            focused
+            selectable={false}
+            showCursor={false}
+            textColor={theme.backgroundPanel}
+            backgroundColor={theme.backgroundPanel}
+            focusedTextColor={theme.backgroundPanel}
+            minHeight={1}
+            maxHeight={1}
+            onPaste={(event: PasteEvent) => {
+              event.preventDefault()
+              appendPassword(new TextDecoder().decode(event.bytes))
+            }}
+          />
+        </box>
+      </box>
+      <box flexDirection="row" gap={2} paddingLeft={2} paddingRight={3} paddingBottom={1}>
+        <text fg={theme.text}>
+          enter <span style={{ fg: theme.textMuted }}>submit</span>
+        </text>
+        <text fg={theme.text}>
+          esc <span style={{ fg: theme.textMuted }}>cancel</span>
+        </text>
+      </box>
+    </box>
+  )
+}
+
+function RegularQuestionPrompt(props: { request: TuiQuestionRequest; directory?: string }) {
   const sdk = useSDK()
   const { theme } = useTheme()
   const renderer = useRenderer()
@@ -32,6 +224,27 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
 
   let textarea: TextareaRenderable | undefined
 
+  const reply = (answers: QuestionAnswer[]) => {
+    if (props.request.protocol === "v2") {
+      return sdk.client.v2.session.question.reply({
+        sessionID: props.request.sessionID,
+        requestID: props.request.id,
+        questionV2Reply: { answers },
+      })
+    }
+    return sdk.client.question.reply({ requestID: props.request.id, directory: props.directory, answers })
+  }
+
+  const rejectRequest = () => {
+    if (props.request.protocol === "v2") {
+      return sdk.client.v2.session.question.reject({
+        sessionID: props.request.sessionID,
+        requestID: props.request.id,
+      })
+    }
+    return sdk.client.question.reject({ requestID: props.request.id, directory: props.directory })
+  }
+
   const question = createMemo(() => questions()[store.tab])
   const confirm = createMemo(() => !single() && store.tab === questions().length)
   const options = createMemo(() => question()?.options ?? [])
@@ -47,18 +260,11 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
 
   function submit() {
     const answers = questions().map((_, i) => store.answers[i] ?? [])
-    void sdk.client.question.reply({
-      requestID: props.request.id,
-      directory: props.directory,
-      answers,
-    })
+    void reply(answers)
   }
 
   function reject() {
-    void sdk.client.question.reject({
-      requestID: props.request.id,
-      directory: props.directory,
-    })
+    void rejectRequest()
   }
 
   function pick(answer: string, custom: boolean = false) {
@@ -71,11 +277,7 @@ export function QuestionPrompt(props: { request: QuestionRequest; directory?: st
       setStore("custom", inputs)
     }
     if (single()) {
-      void sdk.client.question.reply({
-        requestID: props.request.id,
-        directory: props.directory,
-        answers: [[answer]],
-      })
+      void reply([[answer]])
       return
     }
     setStore("tab", store.tab + 1)

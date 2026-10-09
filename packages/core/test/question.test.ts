@@ -60,6 +60,74 @@ describe("QuestionV2", () => {
     }),
   )
 
+  it.effect("returns a sensitive answer only to the waiter and redacts its reply event", () =>
+    Effect.gen(function* () {
+      const service = yield* QuestionV2.Service
+      const events = yield* EventV2.Service
+      const asked = yield* Deferred.make<QuestionV2.Request>()
+      const published: EventV2.Payload[] = []
+      const unsubscribe = yield* events.listen((event) =>
+        Effect.gen(function* () {
+          if (event.type === QuestionV2.Event.Asked.type) {
+            yield* Deferred.succeed(asked, event.data as QuestionV2.Request)
+          }
+          if (event.type === QuestionV2.Event.Replied.type) published.push(event)
+        }),
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const password = "sudo-secret-canary"
+      const fiber = yield* service
+        .askSecret({
+          sessionID,
+          question: {
+            question: "Enter the sudo password",
+            header: "sudo password",
+            options: [],
+            custom: false,
+          },
+        })
+        .pipe(Effect.forkScoped)
+      const request = yield* Deferred.await(asked)
+
+      expect(request.sensitive).toBe(true)
+      expect(JSON.stringify(request)).not.toContain(password)
+      yield* service.reply({ requestID: request.id, answers: [[password]] })
+
+      const secret = yield* Fiber.join(fiber)
+      expect(new TextDecoder().decode(secret)).toBe(password)
+      secret.fill(0)
+      expect(published).toMatchObject([
+        {
+          type: QuestionV2.Event.Replied.type,
+          data: { sessionID, requestID: request.id, answers: [[]] },
+        },
+      ])
+      expect(JSON.stringify(published)).not.toContain(password)
+    }),
+  )
+
+  it.effect("rejects sensitive answers containing line breaks", () =>
+    Effect.gen(function* () {
+      const service = yield* QuestionV2.Service
+      const events = yield* EventV2.Service
+      const asked = yield* Deferred.make<QuestionV2.Request>()
+      const unsubscribe = yield* events.listen((event) =>
+        event.type === QuestionV2.Event.Asked.type
+          ? Deferred.succeed(asked, event.data as QuestionV2.Request).pipe(Effect.asVoid)
+          : Effect.void,
+      )
+      yield* Effect.addFinalizer(() => unsubscribe)
+
+      const fiber = yield* service.askSecret({ sessionID, question }).pipe(Effect.forkScoped)
+      const request = yield* Deferred.await(asked)
+      yield* service.reply({ requestID: request.id, answers: [["not-a-password\nsecond-line"]] })
+      const exit = yield* Fiber.await(fiber)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(exit.cause.toString()).toContain("QuestionV2.RejectedError")
+    }),
+  )
+
   it.effect("publishes rejection, fails the ask, and rejects unknown IDs", () =>
     Effect.gen(function* () {
       const service = yield* QuestionV2.Service

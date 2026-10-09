@@ -1338,6 +1338,7 @@ export type GlobalEvent = {
            * Questions to ask
            */
           questions: Array<QuestionV2Info>
+          sensitive?: boolean
           tool?: QuestionV2Tool
         }
       }
@@ -5620,6 +5621,7 @@ export type QuestionV2Asked = {
      * Questions to ask
      */
     questions: Array<QuestionV2Info>
+    sensitive?: boolean
     tool?: QuestionV2Tool
   }
 }
@@ -6115,6 +6117,7 @@ export type QuestionV2Request = {
    * Questions to ask
    */
   questions: Array<QuestionV2Info>
+  sensitive?: boolean
   tool?: QuestionV2Tool
 }
 
@@ -6819,6 +6822,7 @@ export type EventQuestionV2Asked = {
      * Questions to ask
      */
     questions: Array<QuestionV2Info>
+    sensitive?: boolean
     tool?: QuestionV2Tool
   }
 }

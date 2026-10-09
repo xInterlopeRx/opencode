@@ -2709,6 +2709,7 @@ export type QuestionsListRequestsOutput = {
       readonly multiple?: boolean
       readonly custom?: boolean
     }>
+    readonly sensitive?: boolean
     readonly tool?: { readonly messageID: string; readonly callID: string }
   }>
 }
@@ -2726,6 +2727,7 @@ export type QuestionsListOutput = {
       readonly multiple?: boolean
       readonly custom?: boolean
     }>
+    readonly sensitive?: boolean
     readonly tool?: { readonly messageID: string; readonly callID: string }
   }>
 }["data"]
