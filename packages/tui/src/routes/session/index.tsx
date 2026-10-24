@@ -90,10 +90,14 @@ const GO_UPSELL_ACCOUNT_RATE_LIMIT_LAST_SEEN_AT = "go_upsell_account_rate_limit_
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_DONT_SHOW = "go_upsell_account_rate_limit_dont_show"
 const GO_UPSELL_WINDOW = 86_400_000 // 24 hrs
 const GO_UPSELL_PROVIDERS = new Set(["opencode", "opencode-go"])
+const ASSISTANT_UPDATE_LIFETIME = 2 * 60_000
 
 export const alwaysSeparate = new WeakSet<BoxRenderable>()
 
 type RetryAction = Extract<SessionStatus, { type: "retry" }>["action"]
+
+const userFacingTextPart = (part: Part): part is TextPart =>
+  part.type === "text" && !part.synthetic && !part.ignored && !!part.text.trim()
 
 function goUpsellKeys(action: RetryAction) {
   if (!action) return
@@ -276,6 +280,44 @@ export function Session() {
   })
   const showTimestamps = createMemo(() => timestamps() === "show")
   const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const [scrolledAway, setScrolledAway] = createSignal(false)
+  const latestAssistantUpdate = createMemo(() => {
+    const message = messages().findLast(
+      (item) => item.role === "assistant" && (sync.data.part[item.id] ?? []).some(userFacingTextPart),
+    )
+    if (message?.role !== "assistant") return
+    const part = (sync.data.part[message.id] ?? []).findLast(userFacingTextPart)
+    if (!part) return
+    const text = part.text.replace(/\s+/g, " ").trim()
+    if (!text) return
+    return {
+      messageID: message.id,
+      partID: part.id,
+      completedAt: message.time.completed,
+      preview: Locale.truncate(text, Math.max(1, contentWidth() - 8)),
+    }
+  })
+  const [expiredAssistantUpdateID, setExpiredAssistantUpdateID] = createSignal<string>()
+  createEffect(() => {
+    const update = latestAssistantUpdate()
+    if (!update) return
+    if (typeof update.completedAt !== "number") {
+      setExpiredAssistantUpdateID(undefined)
+      return
+    }
+    const remaining = update.completedAt + ASSISTANT_UPDATE_LIFETIME - Date.now()
+    if (remaining <= 0) {
+      setExpiredAssistantUpdateID(update.messageID)
+      return
+    }
+    const timer = setTimeout(() => setExpiredAssistantUpdateID(update.messageID), remaining)
+    onCleanup(() => clearTimeout(timer))
+  })
+  const recentAssistantUpdate = createMemo(() => {
+    const update = latestAssistantUpdate()
+    if (!update || expiredAssistantUpdateID() === update.messageID) return
+    return update
+  })
   const providers = createMemo(() => Model.index(sync.data.provider))
 
   const scrollAcceleration = createMemo(() => getScrollAcceleration(tuiConfig))
@@ -342,6 +384,11 @@ export function Session() {
 
   let seeded = false
   let scroll: ScrollBoxRenderable
+  const updateScrollPosition = (position?: number) => {
+    if (!scroll || scroll.isDestroyed) return
+    const maxScrollTop = Math.max(0, scroll.scrollHeight - scroll.viewport.height)
+    setScrolledAway(maxScrollTop > 1 && (position ?? scroll.scrollTop) < maxScrollTop - 1)
+  }
   let prompt: PromptRef | undefined
   const bind = (r: PromptRef | undefined) => {
     prompt = r
@@ -1152,7 +1199,12 @@ export function Session() {
   })
 
   // snap to bottom when session changes
-  createEffect(on(() => route.sessionID, toBottom))
+  createEffect(
+    on(() => route.sessionID, () => {
+      setScrolledAway(false)
+      toBottom()
+    }),
+  )
 
   return (
     <LocationProvider location={location()}>
@@ -1178,13 +1230,17 @@ export function Session() {
           <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
             <Show when={session()}>
               <scrollbox
-                ref={(r) => (scroll = r)}
+                ref={(r) => {
+                  scroll = r
+                  if (r) updateScrollPosition(r.scrollTop)
+                }}
                 viewportOptions={{
                   paddingRight: showScrollbar() ? 1 : 0,
                 }}
                 verticalScrollbarOptions={{
                   paddingLeft: 1,
                   visible: showScrollbar(),
+                  onChange: updateScrollPosition,
                   trackOptions: {
                     backgroundColor: theme.backgroundElement,
                     foregroundColor: theme.border,
@@ -1293,6 +1349,31 @@ export function Session() {
                   )}
                 </For>
               </scrollbox>
+              <Show when={scrolledAway() ? recentAssistantUpdate() : undefined}>
+                {(update) => (
+                  <box
+                    position="absolute"
+                    top={0}
+                    left={3}
+                    right={3}
+                    zIndex={20}
+                    border={["left"]}
+                    borderColor={theme.borderActive}
+                    customBorderChars={SplitBorder.customBorderChars}
+                    backgroundColor={theme.backgroundPanel}
+                    paddingLeft={1}
+                    onMouseUp={() => {
+                      if (renderer.getSelection()?.getSelectedText()) return
+                      if (!scroll || scroll.isDestroyed) return
+                      scroll.scrollChildIntoView(update().partID)
+                    }}
+                  >
+                    <text fg={theme.text} wrapMode="none">
+                      {update().preview}
+                    </text>
+                  </box>
+                )}
+              </Show>
               <box flexShrink={0}>
                 <Show when={permissions().length > 0}>
                   <PermissionPrompt
@@ -1688,7 +1769,13 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
   const { theme, syntax } = useTheme()
   return (
     <Show when={props.part.text.trim()}>
-      <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
+      <box
+        id={props.part.id}
+        ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
+        paddingLeft={3}
+        marginTop={1}
+        flexShrink={0}
+      >
         <markdown
           syntaxStyle={syntax()}
           streaming={true}
